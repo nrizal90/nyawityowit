@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Goyangin Sawit — Signage Demo</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; -webkit-user-select:none; user-select:none;
+      -webkit-tap-highlight-color:transparent; touch-action:none; }
+  html, body { width:100%; height:100%; overflow:hidden; background:#0a1c10; }
+  #game { width:100vw; height:100vh; }
+  body { overscroll-behavior:none; }
+</style>
+</head>
+<body>
+<div id="game"></div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/phaser/3.80.1/phaser.min.js"></script>
+<script>
+/* =========================================================================
+   GOYANGIN SAWIT — starter demo signage (Phaser 3)
+   Goyangin pohon -> tandan buah copot -> jatuh ke keranjang -> skor.
+
+   >>> INPUT GOYANG BISA DARI 3 SUMBER (semua manggil addShake): <<<
+   1. Touchscreen : geser/usap cepet kiri-kanan di layar.
+   2. Device fisik: pohon sawit-an dgn sensor gerak -> kirim via WebSocket ->
+      panggil  window.PanenSawitShake(intensity 0..1)  (hook udah disiapin).
+   3. HP dijepit  : DeviceMotion API (buat prototipe cepet).
+   ========================================================================= */
+
+const W = 1080, H = 1920;
+const ROUND = 45, RESET_AFTER = 12;
+const SCORE_BUNCH = 10, SCORE_GOLD = 30;
+const MAX_SWAY = 0.10;          // amplitudo goyang batang (rad)
+const LOOSEN_RATE = 1.35;       // seberapa cepet buah copot pas digoyang
+const FRUIT_TARGET = 160;
+
+const C = { bgTop:0x14351f, bgBot:0x0a1c10, soil:0x5a3410, gold:'#f2b705', cream:'#f5efe0', red:'#ff5a4a' };
+const PAL = {
+  ripe:   { base:0xE8541E, base2:0xF2872A, tip:0x7a1c04, hi:0xffb066, dark:0x5c1603, bract:0x8a3410, rotten:false },
+  unripe: { base:0x4e7d1e, base2:0x6b9a2c, tip:0x2c4a12, hi:0x9fc95a, dark:0x203a0e, bract:0x3a5a1c, rotten:false },
+  rot:    { base:0x4a3b28, base2:0x5f4a30, tip:0x241a10, hi:0x6e5a3c, dark:0x160f08, bract:0x33281a, rotten:true },
+};
+
+// ---- gambar TBS (sama kaya game satunya) ---------------------------------
+function fillOval(g,x,y,rw,rh,rot){ const pts=[],st=14,cs=Math.cos(rot),sn=Math.sin(rot);
+  for(let i=0;i<st;i++){const a=(i/st)*Math.PI*2,px=Math.cos(a)*rw,py=Math.sin(a)*rh;
+    pts.push({x:x+px*cs-py*sn,y:y+px*sn+py*cs});} g.fillPoints(pts,true); }
+function drawFruit(g,x,y,rot,p){ g.fillStyle(p.dark,1); fillOval(g,x+1.5,y+2,12,8,rot);
+  g.fillStyle(Math.random()<0.35?p.base2:p.base,1); fillOval(g,x,y,12,8,rot);
+  g.fillStyle(p.tip,1); fillOval(g,x+Math.cos(rot)*7,y+Math.sin(rot)*7,5,5,rot);
+  g.fillStyle(p.hi,0.9); fillOval(g,x-Math.cos(rot)*3-2,y-Math.sin(rot)*3-2,4,3,rot); }
+function makeBunch(scene,key,p){ const w=160,h=205,cx=80,cy=112,rx=62,ry=82;
+  const g=scene.make.graphics({add:false});
+  g.fillStyle(0x6b4a24,1); g.fillRect(cx-9,2,18,30); g.fillStyle(0x8a6234,1); fillOval(g,cx,6,11,6,0);
+  g.fillStyle(p.bract,1);
+  [[-1,-0.2],[-0.75,-0.7],[-0.35,-1],[0.35,-1],[0.75,-0.7],[1,-0.2],[-0.9,0.35],[0.9,0.35]].forEach(([dx,dy])=>{
+    const bx=cx+dx*rx,by=cy+dy*ry,ang=Math.atan2(dy,dx);
+    g.fillTriangle(bx,by,bx+Math.cos(ang)*26-Math.sin(ang)*6,by+Math.sin(ang)*26+Math.cos(ang)*6,
+      bx+Math.cos(ang)*26+Math.sin(ang)*6,by+Math.sin(ang)*26-Math.cos(ang)*6); });
+  for(let i=0;i<95;i++){ const yy=cy+(Math.random()*2-1)*ry,norm=(yy-cy)/ry;
+    let xr=rx*Math.sqrt(Math.max(0,1-norm*norm)); if(norm>0) xr*=(1-0.4*norm);
+    const xx=cx+(Math.random()*2-1)*xr,rot=Math.atan2(yy-cy,xx-cx)+(Math.random()*0.4-0.2); drawFruit(g,xx,yy,rot,p); }
+  if(p.rotten){ g.fillStyle(0x0e0805,0.85); for(let i=0;i<14;i++){const a=Math.random()*Math.PI*2,r=Math.sqrt(Math.random());
+    fillOval(g,cx+Math.cos(a)*rx*r,cy+Math.sin(a)*ry*r,7+Math.random()*5,6+Math.random()*4,a);} }
+  g.generateTexture(key,w,h); g.destroy(); }
+function makeSpark(scene){ const g=scene.make.graphics({add:false}); g.fillStyle(0xffffff,1); g.fillCircle(8,8,8);
+  g.generateTexture('spark',16,16); g.destroy(); }
+function addFruit(scene,x,y,key){ const img=scene.add.image(x,y,key),base=FRUIT_TARGET/img.width;
+  img.setData('base',base); img.setScale(base); return img; }
+
+// ---- pohon (container yg diputar buat efek goyang) -----------------------
+function buildTree(scene, baseX, baseY) {
+  const cont = scene.add.container(baseX, baseY);
+  const g = scene.add.graphics(); cont.add(g);
+  for (let i=0;i<26;i++){ const y=-i*38,t=i/26,w=Phaser.Math.Linear(74,42,t),x=Math.sin(i*0.35)*8;
+    g.fillStyle(0x6b4a24,1); g.fillRect(x-w/2,y-40,w,42);
+    g.fillStyle(0x543a1c,1); g.fillRect(x-w/2,y-6,w,5); }
+  const topX=Math.sin(26*0.35)*8, topY=-26*38, frN=10;
+  for(let k=0;k<frN;k++){ const ang=-Math.PI/2+(k-(frN-1)/2)*(Math.PI/frN),len=Phaser.Math.Between(260,340);
+    const ex=topX+Math.cos(ang)*len, ey=topY+Math.sin(ang)*len*0.8+ (Math.abs(k-(frN-1)/2))*14, perp=ang+Math.PI/2,wd=26;
+    g.fillStyle(0x1f5a2a,1); g.fillTriangle(topX,topY,ex+Math.cos(perp)*wd,ey+Math.sin(perp)*wd,ex-Math.cos(perp)*wd,ey-Math.sin(perp)*wd);
+    g.fillStyle(0x2f7a3a,1); g.fillTriangle(topX,topY,ex+Math.cos(perp)*4,ey+Math.sin(perp)*4,ex-Math.cos(perp)*4,ey-Math.sin(perp)*4); }
+  cont.setData('topY', topY);
+  return cont;
+}
+
+function drawScenery(scene){ const g=scene.add.graphics();
+  g.fillGradientStyle(C.bgTop,C.bgTop,C.bgBot,C.bgBot,1); g.fillRect(0,0,W,H);
+  g.fillStyle(C.soil,1); g.fillRect(0,H-160,W,160); g.fillStyle(0x6e4418,1); g.fillRect(0,H-160,W,12); return g; }
+
+function drawBasket(scene,x,y){ const g=scene.add.graphics();
+  g.fillStyle(0x7a4a1e,1); g.fillPoints([{x:x-150,y:y},{x:x+150,y:y},{x:x+110,y:y+120},{x:x-110,y:y+120}],true);
+  g.fillStyle(0x5c3714,1); for(let i=-2;i<=2;i++) g.fillRect(x-140+ (i+2)*58, y, 10, 118);
+  g.fillStyle(0x8a5626,1); g.fillRect(x-160,y-16,320,20); return g; }
+
+function floatText(scene,x,y,msg,color){ const t=scene.add.text(x,y,msg,{fontFamily:'Anton',fontSize:'78px',color})
+  .setOrigin(0.5).setStroke('#000000',6);
+  scene.tweens.add({targets:t,y:y-150,alpha:0,duration:900,ease:'Cubic.easeOut',onComplete:()=>t.destroy()}); }
+
+// =========================================================================
+class Boot extends Phaser.Scene { constructor(){ super('Boot'); }
+  create(){ makeBunch(this,'ripe',PAL.ripe); makeBunch(this,'unripe',PAL.unripe); makeBunch(this,'rot',PAL.rot); makeSpark(this);
+    if(!this.registry.has('hi')) this.registry.set('hi',0); this.scene.start('Attract'); } }
+
+// =========================================================================
+class Attract extends Phaser.Scene { constructor(){ super('Attract'); }
+  create(){ drawScenery(this);
+    const tree=buildTree(this,W/2,H-160);
+    // idle sway pelan
+    this.tweens.add({targets:tree,rotation:0.03,duration:1400,yoyo:true,repeat:-1,ease:'Sine.easeInOut'});
+    // beberapa tandan gantung
+    [[-170,-930],[-60,-980],[60,-980],[170,-930]].forEach(([ox,oy])=>{
+      const b=addFruit(this,W/2+ox,H-160+oy,'ripe'); b.setScale(b.getData('base')); });
+
+    this.add.text(W/2,300,'GOYANGIN',{fontFamily:'Anton',fontSize:'170px',color:C.cream}).setOrigin(0.5).setStroke('#0a1c10',12);
+    this.add.text(W/2,440,'SAWIT',{fontFamily:'Anton',fontSize:'170px',color:C.gold}).setOrigin(0.5).setStroke('#0a1c10',12);
+    this.add.text(W/2,H-560,'Usap cepat kiri-kanan buat goyangin pohon!',{fontFamily:'Inter',fontSize:'46px',color:C.cream}).setOrigin(0.5);
+    this.add.text(W/2,H-480,'REKOR: '+this.registry.get('hi'),{fontFamily:'Anton',fontSize:'70px',color:C.cream}).setOrigin(0.5).setAlpha(0.85);
+
+    const cta=this.add.text(W/2,H-360,'SENTUH UNTUK MULAI',{fontFamily:'Anton',fontSize:'92px',color:C.gold}).setOrigin(0.5).setStroke('#0a1c10',10);
+    this.tweens.add({targets:cta,alpha:0.25,scale:1.06,duration:750,yoyo:true,repeat:-1,ease:'Sine.easeInOut'});
+    this.input.once('pointerdown',()=>this.scene.start('Game')); } }
+
+// =========================================================================
+class Game extends Phaser.Scene {
+  constructor(){ super('Game'); }
+  create(){
+    drawScenery(this);
+    this.baseX=W/2; this.baseY=H-160;
+    drawBasket(this, this.baseX, H-330);
+    this.tree=buildTree(this, this.baseX, this.baseY);
+    this.fx={ good:this.add.particles(0,0,'spark',{speed:{min:150,max:420},lifespan:520,scale:{start:1.1,end:0},emitting:false,tint:0xffb020}),
+              gold:this.add.particles(0,0,'spark',{speed:{min:180,max:460},lifespan:560,scale:{start:1.2,end:0},emitting:false,tint:0xffe066}) };
+
+    this.score=0; this.timeLeft=ROUND; this.energy=0; this.phase=0;
+    this.bunches=[];
+    this.pool=[{ox:-175,oy:-930},{ox:-60,oy:-985},{ox:55,oy:-985},{ox:170,oy:-930},{ox:-5,oy:-895}];
+    this.pool.forEach((s,i)=>this.spawnBunch(i));
+
+    // HUD
+    this.add.rectangle(0,0,W,150,0x000000,0.28).setOrigin(0);
+    this.scoreTxt=this.add.text(40,30,'SKOR 0',{fontFamily:'Anton',fontSize:'80px',color:C.cream});
+    this.timeTxt=this.add.text(W-40,30,ROUND+'',{fontFamily:'Anton',fontSize:'80px',color:C.gold}).setOrigin(1,0);
+    // meter GETAR
+    this.add.text(40,H-90,'GETAR',{fontFamily:'Anton',fontSize:'44px',color:C.cream});
+    this.meter=this.add.graphics();
+
+    // ---- INPUT ----
+    this.lastPos=null;
+    this.input.on('pointermove',(p)=>{ if(this.lastPos){ this.addShake(Phaser.Math.Distance.Between(p.x,p.y,this.lastPos.x,this.lastPos.y)*0.0006);} this.lastPos={x:p.x,y:p.y}; });
+    this.input.on('pointerdown',(p)=>{ this.lastPos={x:p.x,y:p.y}; this.addShake(0.10); });
+
+    // HOOK device fisik (WebSocket manggil ini): window.PanenSawitShake(0..1)
+    this.shakeHook=(v)=>{ if(this.scene.isActive('Game')) this.addShake(Phaser.Math.Clamp(v,0,1)); };
+    window.PanenSawitShake=this.shakeHook;
+    // HP dijepit di dalam prop (opsional, prototipe)
+    this.motionHook=(e)=>{ const a=e.accelerationIncludingGravity; if(!a) return;
+      const m=Math.hypot(a.x||0,a.y||0,a.z||0); this.addShake(Math.max(0,(m-11))*0.02); };
+    try{ window.addEventListener('devicemotion',this.motionHook); }catch(_){}
+
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN,()=>{ if(window.PanenSawitShake===this.shakeHook) delete window.PanenSawitShake;
+      window.removeEventListener('devicemotion',this.motionHook); });
+
+    this.time.addEvent({delay:1000,repeat:ROUND-1,callback:()=>{ this.timeLeft--; this.timeTxt.setText(this.timeLeft+'');
+      if(this.timeLeft<=5) this.timeTxt.setColor(C.red); if(this.timeLeft<=0) this.endRound(); }});
+  }
+
+  addShake(v){ this.energy=Math.min(1,this.energy+v); }
+
+  spawnBunch(i){ const s=this.pool[i]; const premium=Math.random()<0.15;
+    const img=addFruit(this,this.baseX+s.ox,this.baseY+s.oy,'ripe'); img.setScale(img.getData('base'));
+    if(premium) img.setTint(0xffd23f);
+    this.bunches[i]={img,ox:s.ox,oy:s.oy,loosen:0,dropped:false,premium}; }
+
+  drop(i){ const b=this.bunches[i]; if(!b||b.dropped) return; b.dropped=true;
+    const val=b.premium?SCORE_GOLD:SCORE_BUNCH; const targetX=this.baseX+Phaser.Math.Between(-120,120);
+    this.tweens.add({targets:b.img,x:targetX,y:H-300,angle:Phaser.Math.Between(-90,90),duration:650,ease:'Quad.easeIn',
+      onComplete:()=>{ (b.premium?this.fx.gold:this.fx.good).explode(18,b.img.x,H-320);
+        floatText(this,targetX,H-360,'+'+val,b.premium?C.gold:C.cream); b.img.destroy(); }});
+    this.score+=val; this.scoreTxt.setText('SKOR '+this.score);
+    this.time.delayedCall(700,()=>{ if(this.scene.isActive('Game')) this.spawnBunch(i); }); }
+
+  update(time,delta){
+    this.energy*=Math.pow(0.9,delta/16.67);           // decay
+    this.phase+=(0.12+this.energy*0.45);
+    const ang=Math.sin(this.phase)*this.energy*MAX_SWAY;
+    this.tree.rotation=ang + (Math.random()-0.5)*this.energy*0.02;
+
+    const cs=Math.cos(ang),sn=Math.sin(ang);
+    this.bunches.forEach((b,i)=>{ if(!b||b.dropped) return;
+      b.img.x=this.baseX + b.ox*cs - b.oy*sn;
+      b.img.y=this.baseY + b.ox*sn + b.oy*cs;
+      b.img.rotation=ang;
+      b.loosen+=this.energy*(delta/1000)*LOOSEN_RATE;
+      b.img.setScale(b.img.getData('base')*(1+Math.sin(this.phase*2)*this.energy*0.06)); // wobble
+      if(b.loosen>=1 && this.timeLeft>0) this.drop(i);
+    });
+
+    this.meter.clear(); this.meter.fillStyle(0x000000,0.4); this.meter.fillRoundedRect(40,H-64,W-80,34,8);
+    this.meter.fillStyle(this.energy>0.7?0xffd23f:0x8fd14f,1); this.meter.fillRoundedRect(44,H-60,(W-88)*this.energy,26,6);
+  }
+
+  endRound(){ this.time.delayedCall(400,()=>this.scene.start('GameOver',{score:this.score})); }
+}
+
+// =========================================================================
+class GameOver extends Phaser.Scene { constructor(){ super('GameOver'); }
+  init(d){ this.finalScore=d.score||0; }
+  create(){ drawScenery(this); this.add.rectangle(0,0,W,H,0x000000,0.45).setOrigin(0);
+    const hi=this.registry.get('hi'), isRec=this.finalScore>hi; if(isRec) this.registry.set('hi',this.finalScore);
+    this.add.text(W/2,300,'SELESAI',{fontFamily:'Anton',fontSize:'130px',color:C.cream}).setOrigin(0.5);
+    this.add.text(W/2,470,'SKOR KAMU',{fontFamily:'Inter',fontSize:'48px',color:C.cream}).setOrigin(0.5).setAlpha(0.8);
+    this.add.text(W/2,600,this.finalScore+'',{fontFamily:'Anton',fontSize:'220px',color:C.gold}).setOrigin(0.5).setStroke('#0a1c10',12);
+    if(isRec){ const r=this.add.text(W/2,780,'★ REKOR BARU! ★',{fontFamily:'Anton',fontSize:'70px',color:C.cream}).setOrigin(0.5);
+      this.tweens.add({targets:r,scale:1.1,duration:500,yoyo:true,repeat:-1,ease:'Sine.easeInOut'}); }
+    else this.add.text(W/2,780,'Rekor: '+this.registry.get('hi'),{fontFamily:'Inter',fontSize:'46px',color:C.cream}).setOrigin(0.5).setAlpha(0.8);
+    this.drawQR(W/2,1180,320);
+    this.add.text(W/2,1420,'Pindai untuk klaim hadiah',{fontFamily:'Inter',fontSize:'44px',color:C.cream}).setOrigin(0.5);
+    let left=RESET_AFTER; const cd=this.add.text(W/2,H-420,'Kembali otomatis dalam '+left+'s',{fontFamily:'Inter',fontSize:'40px',color:C.cream}).setOrigin(0.5).setAlpha(0.7);
+    this.time.addEvent({delay:1000,repeat:RESET_AFTER-1,callback:()=>{ left--; cd.setText('Kembali otomatis dalam '+left+'s'); if(left<=0) this.scene.start('Attract'); }});
+    const cta=this.add.text(W/2,H-280,'SENTUH UNTUK MAIN LAGI',{fontFamily:'Anton',fontSize:'80px',color:C.gold}).setOrigin(0.5).setStroke('#0a1c10',10);
+    this.tweens.add({targets:cta,alpha:0.3,duration:700,yoyo:true,repeat:-1,ease:'Sine.easeInOut'});
+    this.time.delayedCall(500,()=>this.input.once('pointerdown',()=>this.scene.start('Game'))); }
+  drawQR(cx,cy,size){ this.add.rectangle(cx,cy,size+40,size+40,0xffffff).setOrigin(0.5);
+    const n=13,cell=size/n,ox=cx-size/2,oy=cy-size/2,g=this.add.graphics(); g.fillStyle(0x0a1c10,1);
+    for(let r=0;r<n;r++)for(let c=0;c<n;c++){ const cor=(r<3&&c<3)||(r<3&&c>=n-3)||(r>=n-3&&c<3);
+      if(cor?((r===0||r===2||c===0||c===2)||(r===n-1||c===n-1)):Math.random()>0.5) g.fillRect(ox+c*cell,oy+r*cell,cell,cell);} }
+}
+
+// =========================================================================
+function launch(){ new Phaser.Game({ type:Phaser.AUTO,parent:'game',backgroundColor:'#0a1c10',
+  scale:{mode:Phaser.Scale.FIT,autoCenter:Phaser.Scale.CENTER_BOTH,width:W,height:H}, scene:[Boot,Attract,Game,GameOver] }); }
+document.addEventListener('contextmenu',e=>e.preventDefault());
+document.addEventListener('gesturestart',e=>e.preventDefault());
+if(document.fonts&&document.fonts.ready){ Promise.all([document.fonts.load('60px "Anton"'),document.fonts.load('40px "Inter"')])
+  .then(()=>document.fonts.ready).then(launch).catch(launch); } else { launch(); }
+</script>
+</body>
+</html>
