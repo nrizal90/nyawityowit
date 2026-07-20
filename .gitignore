@@ -1,0 +1,9 @@
+# Folder hasil generate / kerja Claude Code
+.claude/
+CLAUDE.md
+
+# File temporary & OS
+Thumbs.db
+Desktop.ini
+*.tmp
+*.log
